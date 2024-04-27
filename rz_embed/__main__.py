@@ -25,7 +25,7 @@ def main():
 
     gz_dir = (args.target_src / "rz-embed")
     gz_dir.mkdir(exist_ok=True)
-    with open(gz_dir / '.gitignore','w') as outf:
+    with open(gz_dir / '.gitignore', 'w') as outf:
         outf.write('*.gz')
 
     for r in resources:
