@@ -1,7 +1,7 @@
 # rz-embed
 
 **rz-embed** bundles your frontend code (svelte, angular..) as gzip-compressed
-data embedded in [rocket.rs]() binaries.
+data embedded in [rocket.rs](https://rocket.rs/) binaries.
 
 > TL;DR  
 > `cargo add flate2 lazy_static`  
