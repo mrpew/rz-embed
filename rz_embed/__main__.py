@@ -34,6 +34,7 @@ def main():
         consts.append(r.decompression_routine())
         handlers.append(r.handler())
         routes += r.route_handler_list()
+        print(f'[+] {r.rel_path()}')
 
     indent = " " * 4
     route_list = f"\n{indent*2}" + f",\n{indent*2}".join(routes) + f"\n{indent}"
