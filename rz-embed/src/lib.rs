@@ -1,89 +1,36 @@
-use anyhow::{anyhow, Result};
+extern crate proc_macro;
+use std::path::PathBuf;
+
+use proc_macro::TokenStream;
+use proc_macro2::Span;
+use quote::quote;
+use syn::{
+    parse::{Parse, ParseStream},
+    parse_macro_input, Expr, Ident, LitStr, Token,
+};
+
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use regex::Regex;
-use std::fs::{create_dir_all, File};
+use std::fs::{self, create_dir_all, File};
 use std::io::{self, BufReader, BufWriter, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use walkdir::WalkDir;
 
-pub const BINARY_RESPONSE_DECL: &str = "
-pub struct BinaryResponse(&'static [u8], rocket::http::ContentType);
-
-impl<'r> rocket::response::Responder<'r, 'static> for BinaryResponse {
-    fn respond_to(self, _: &'r Request<'_>) -> rocket::response::Result<'static> {
-        rocket::response::Response::build()
-            .header(self.1)
-            .sized_body(self.0.len(), Cursor::new(self.0))
-            .ok()
-    }
-}
-";
-
-pub fn decompression_routine(const_name: &str, compressed_source: &PathBuf) -> String {
-    format!(
-        "
-lazy_static! {{
-    static ref {const_name}: Vec<u8> = {{
-        let compressed_data: &[u8] = include_bytes!({compressed_source:?});
-        let mut decoder = GzDecoder::new(compressed_data);
-        let mut decompressed_data = Vec::new();
-        decoder.read_to_end(&mut decompressed_data).unwrap();
-        decompressed_data
-    }};
-}}"
-    )
-}
-
-pub struct HandlerDecl {
-    pub route_fn: String,
-    pub handler_code: String,
-}
-pub fn route_function_decl(
-    url: &PathBuf,
-    return_type: &str,
-    return_statement: &str,
-) -> HandlerDecl {
-    let route_slug = slugify(&url.to_string_lossy());
-    let handler_code = format!(
-        "
-#[get({url:?})]
-pub fn serve_{route_slug}() -> {return_type} {{
-    {return_statement}
-}}
-"
-    );
-    HandlerDecl {
-        route_fn: route_slug,
-        handler_code,
-    }
-}
-
-fn routes_collector(routes: Vec<String>) -> String {
-    let indent = " ".repeat(4);
-    let joined_routes = routes.join(&format!(",\n{}", indent.repeat(2)));
-    let route_list = format!("\n{}{}\n{}", indent.repeat(2), joined_routes, indent);
-    format!(
-        "
-pub fn routes() -> Vec<Route> {{
-    routes![{route_list}]
-}}
-"
-    )
-}
-
 fn slugify(value: &str) -> String {
-    // Create regex patterns
-    let re_non_alphanumeric = Regex::new(r"[^\w\s-]").unwrap();
-    let re_whitespace_hyphen = Regex::new(r"[-\s]+").unwrap();
+    // Create regex patterns - TODO: make these lazy_static
+    let RE_NON_ALPHANUMERIC = Regex::new(r"[^\w\s-]").unwrap();
+    let RE_WHITESPACE_HYPHEN = Regex::new(r"[-\s]+").unwrap();
+    let RE_REDUCE_UNDESCORES = Regex::new(r"[_]+").unwrap();
 
     // Replace non-alphanumeric characters with underscores
-    let mut value = re_non_alphanumeric.replace_all(value, "_").to_string();
+    let mut value = RE_NON_ALPHANUMERIC.replace_all(value, "_").to_string();
     // Trim and convert to lowercase
     value = value.trim().to_lowercase();
     // Replace whitespace and hyphens with underscores
-    value = re_whitespace_hyphen.replace_all(&value, "_").to_string();
-
+    value = RE_WHITESPACE_HYPHEN.replace_all(&value, "_").to_string();
+    // Reduce multiple underscores to one
+    value = RE_REDUCE_UNDESCORES.replace_all(&value, "_").to_string();
     // Remove leading underscore if present
     if value.starts_with('_') {
         value = value[1..].to_string();
@@ -93,7 +40,7 @@ fn slugify(value: &str) -> String {
 }
 
 #[derive(Debug)]
-pub enum ContentType {
+enum ContentType {
     Unknown,
     Png,
     Ttf,
@@ -109,19 +56,10 @@ impl ContentType {
             _ => Self::Unknown,
         }
     }
-
-    pub fn rocket_type(&self) -> &str {
-        match self {
-            ContentType::Unknown => todo!(),
-            ContentType::Png => "ContentType::PNG",
-            ContentType::Ttf => "ContentType::TTF",
-            ContentType::Ico => "ContentType::Icon",
-        }
-    }
 }
 
 #[derive(Debug)]
-pub enum FileType {
+enum FileType {
     Html,
     JavaScript,
     Css,
@@ -145,36 +83,12 @@ impl FileType {
             None => FileType::Binary(ContentType::Unknown),
         }
     }
-
-    pub fn rocket_return_type(&self) -> &str {
-        match self {
-            FileType::Html => "rocket::response::content::RawHtml<&'static [u8]>",
-            FileType::JavaScript => "rocket::response::content::RawJavaScript<&'static [u8]>",
-            FileType::Css => "rocket::response::content::RawCss<&'static [u8]>",
-            FileType::Json => "rocket::response::content::RawJson<&'static [u8]>",
-            FileType::Binary(_) => "BinaryResponse",
-        }
-    }
-
-    pub fn return_statement(&self, const_name: &str) -> String {
-        match self {
-            FileType::Html => format!("RawHtml({const_name})"),
-            FileType::JavaScript => format!("RawJavaScript({const_name})"),
-            FileType::Css => format!("RawCss({const_name})"),
-            FileType::Json => format!("RawJson({const_name})"),
-            FileType::Binary(content_type) => format!(
-                "BinaryResponse({const_name},{})",
-                content_type.rocket_type()
-            ),
-        }
-    }
 }
 
-pub struct ResourceFile {
-    path: PathBuf,
+struct ResourceFile {
+    pub path: PathBuf,
     pub slug: String,
-    pub name: String,
-    pub extension: Option<String>,
+    pub const_name: String,
     pub file_type: FileType,
 }
 
@@ -186,27 +100,26 @@ impl std::fmt::Display for ResourceFile {
 
 impl ResourceFile {
     /// Create a ResourceFile from a path relative to the source directory
-    pub fn from_path(rel_path: &Path) -> Result<Self> {
+    pub fn from_path(rel_path: &Path) -> Self {
         let name = rel_path
             .file_name()
-            .ok_or(anyhow!("Failed to get file name"))?
+            .expect("Failed to get file name")
             .to_str()
-            .ok_or(anyhow!("Failed to convert file name to str"))?;
-        let path_str = rel_path
-            .to_str()
-            .ok_or(anyhow!("Failed to convert path to str"))?;
+            .expect("Failed to convert file name to str");
+        let path_str = rel_path.to_str().expect("Failed to convert path to str");
         let extension = name
             .split('.')
             .last()
             .map_or(None, |ext| Some(ext.to_string()));
         let file_type = FileType::from_extension(&extension);
-        Ok(Self {
+        let slug = slugify(path_str);
+        let const_name = slug.to_ascii_uppercase();
+        Self {
             path: rel_path.to_owned(),
-            slug: slugify(path_str),
-            name: name.to_string(),
-            extension,
+            slug,
+            const_name,
             file_type,
-        })
+        }
     }
 
     pub fn collect(root_dir: &PathBuf) -> Vec<ResourceFile> {
@@ -214,70 +127,77 @@ impl ResourceFile {
         for entry in WalkDir::new(&root_dir).into_iter().filter_map(Result::ok) {
             let path = entry.path();
             if path.is_file() {
-                if let Ok(relative_path) = path.strip_prefix(&root_dir) {
-                    match ResourceFile::from_path(relative_path) {
-                        Ok(resource) => {
-                            result.push(resource);
-                        }
-                        Err(err) => {
-                            log::warn!("Skipping {relative_path:?}: {err}");
-                        }
-                    }
-                }
+                let relative_path = path.strip_prefix(&root_dir).expect("path error");
+                let resource = ResourceFile::from_path(relative_path);
+                result.push(resource);
             }
         }
         result
     }
     //
-
-    fn return_type(&self) -> &str {
-        self.file_type.rocket_return_type()
-    }
-
-    fn return_statement(&self) -> String {
-        self.file_type.return_statement(&self.slug)
-    }
 }
 
-fn gz_dir(root: &PathBuf) -> PathBuf {
-    let mut d = root.clone();
-    d.push("rz-embed");
-    d
-}
-
-fn compress_resource(src: &PathBuf, dst: &PathBuf, r: &ResourceFile) -> Result<(u64, u64)> {
+fn compress_resource(src: &PathBuf, dst: &PathBuf, r: &ResourceFile) -> (u64, u64) {
     let mut src = src.clone();
     src.push(&r.path);
+    let meta_original = fs::metadata(&src).expect("Failed to get file metadata");
 
-    // Open the source file for reading
-    let f_in = File::open(&src)?;
-    let reader = BufReader::new(f_in);
-
-    // Create the destination path
     let mut compressed_path = dst.clone();
     compressed_path.push(format!("{}.gz", r.slug));
 
+    // Check if the compressed file exists, return early if the original was not
+    // modified since compression occured.
+    if let Ok(compressed_metadata) = fs::metadata(&compressed_path) {
+        if meta_original
+            .modified()
+            .expect("Failed to get modified time")
+            <= compressed_metadata
+                .modified()
+                .expect("Failed to get modified time")
+        {
+            let original_sz = meta_original.len();
+            let compressed_sz = compressed_metadata.len();
+            println!(
+                "[~] {} already compressed {} -> {} bytes ({:.2}%)",
+                src.display(),
+                original_sz,
+                compressed_sz,
+                calculate_compression_rate(original_sz, compressed_sz)
+            );
+            return (meta_original.len(), compressed_metadata.len());
+        }
+    }
+
+    // Open the source file for reading
+    let f_in = File::open(&src).expect("Failed to open source file");
+    let reader = BufReader::new(f_in);
+
     // Open the destination file for writing
-    let f_out = File::create(&compressed_path)?;
+    let f_out = File::create(&compressed_path).expect("Failed to create compressed file");
     let writer = BufWriter::new(f_out);
 
     // Create a GzEncoder to compress the data
     let mut encoder = GzEncoder::new(writer, Compression::default());
 
-    // Copy the data from the source file to the compressed file
-    io::copy(&mut reader.take(u64::MAX), &mut encoder)?;
-    // Finish the compression process
-    encoder.finish()?;
+    // Compress the file
+    io::copy(&mut reader.take(u64::MAX), &mut encoder).expect("Read failed");
+    encoder.finish().expect("Compression failed");
 
-    let meta_compressed = std::fs::metadata(compressed_path)?;
-    let meta_original = std::fs::metadata(src)?;
-    let original_size = meta_original.len();
-    let compressed_size = meta_compressed.len();
+    let meta_compressed = fs::metadata(compressed_path).expect("Failed to get metadata");
+    let original_sz = meta_original.len();
+    let compressed_sz = meta_compressed.len();
+    println!(
+        "[+] {}: {} -> {} bytes ({:.2}%)",
+        src.display(),
+        original_sz,
+        compressed_sz,
+        calculate_compression_rate(original_sz, compressed_sz)
+    );
 
-    Ok((original_size, compressed_size))
+    (original_sz, compressed_sz)
 }
 
-pub fn calculate_compression_rate(original_size: u64, compressed_size: u64) -> f64 {
+fn calculate_compression_rate(original_size: u64, compressed_size: u64) -> f64 {
     if original_size == 0 {
         return 0.0;
     }
@@ -285,65 +205,254 @@ pub fn calculate_compression_rate(original_size: u64, compressed_size: u64) -> f
     rate * 100.0
 }
 
-pub fn compress_resources(
-    src: &PathBuf,
-    dst: &PathBuf,
-    resources: Vec<ResourceFile>,
-) -> Result<(u64, u64)> {
-    let mut total = 0_u64;
-    let mut compressed = 0_u64;
-    let gz = gz_dir(dst);
-    create_dir_all(&gz)?;
+fn compress_resources(src: &PathBuf, gz: &PathBuf, resources: &Vec<ResourceFile>) -> (u64, u64) {
+    let mut total_original_sz = 0_u64;
+    let mut total_compressed_sz = 0_u64;
+    create_dir_all(&gz).expect("Failed to create gz directory");
     for r in resources {
-        let (orig, reduced) = compress_resource(&src, &gz, &r)?;
-        let rate = calculate_compression_rate(orig, reduced);
-        log::debug!("{:?} {orig} -> {reduced} ({rate:.2})", r.path);
-        total += orig;
-        compressed += reduced;
+        let (orig, reduced) = compress_resource(&src, &gz, &r);
+        total_original_sz += orig;
+        total_compressed_sz += reduced;
     }
-    Ok((total, compressed))
+    println!(
+        "[*] total: {} -> {} bytes ({:.2}%)",
+        total_original_sz,
+        total_compressed_sz,
+        calculate_compression_rate(total_original_sz, total_compressed_sz)
+    );
+    (total_original_sz, total_compressed_sz)
 }
 
-pub fn generate_code(target_dir: &PathBuf, resources: &Vec<ResourceFile>) -> Result<String> {
-    let mut code = String::from(
-        "use lazy_static::lazy_static;
-use flate2::read::GzDecoder;
-",
-    );
-    let gz_dir = gz_dir(&target_dir);
+//
+
+struct InclAsCompressedArgs {
+    folder_path: LitStr,
+    module_name: syn::Ident,
+    rocket: bool,
+}
+
+impl Parse for InclAsCompressedArgs {
+    fn parse(input: ParseStream) -> syn::parse::Result<Self> {
+        let folder_path: LitStr = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        let mut module_name = None;
+        let mut rocket = false;
+
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+
+            match ident.to_string().as_str() {
+                "module_name" => {
+                    let name: LitStr = input.parse()?;
+                    module_name = Some(Ident::new(&name.value(), name.span()));
+                }
+                "rocket" => {
+                    let pub_expr: Expr = input.parse()?;
+                    if let Expr::Lit(expr_lit) = pub_expr {
+                        if let syn::Lit::Bool(lit_bool) = expr_lit.lit {
+                            rocket = lit_bool.value;
+                        }
+                    }
+                }
+                _ => return Err(syn::Error::new(ident.span(), "Unexpected parameter")),
+            }
+
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        Ok(InclAsCompressedArgs {
+            folder_path: folder_path.clone(),
+            module_name: module_name.unwrap_or_else(|| Ident::new("embedded", folder_path.span())),
+            rocket,
+        })
+    }
+}
+
+fn generate_rocket_code(resources: &Vec<ResourceFile>) -> proc_macro2::TokenStream {
+    let mut generated_code = quote! {};
+    let mut route_idents = Vec::<syn::Ident>::new();
+
     if resources
         .iter()
         .any(|r| matches!(r.file_type, FileType::Binary(_)))
     {
-        code.push_str(BINARY_RESPONSE_DECL);
+        generated_code = quote! {
+        #generated_code
+
+        pub struct BinaryResponse(&'static [u8], rocket::http::ContentType);
+        impl<'r> rocket::response::Responder<'r, 'static> for BinaryResponse {
+            fn respond_to(self, _: &'r rocket::request::Request<'_>) -> rocket::response::Result<'static> {
+                rocket::response::Response::build()
+                    .header(self.1)
+                    .sized_body(self.0.len(), std::io::Cursor::new(self.0))
+                    .ok()
+            }
+        }
+                    };
     }
 
-    let mut const_decls = String::new();
-    let mut handlers = String::new();
-    let mut routes = Vec::<String>::new();
-    for r in resources {
-        let mut compressed_rel = gz_dir.clone().strip_prefix(&target_dir)?.to_owned();
-        compressed_rel.push(format!("{}.gz", r.slug));
-        let decl = decompression_routine(&r.slug, &compressed_rel);
-        const_decls.push_str(&decl);
+    for res in resources {
+        let const_name = syn::Ident::new(&res.const_name, Span::call_site());
+        let mut handler_url = String::from("/");
+        handler_url.push_str(res.path.to_str().expect("path to_str failed"));
+        let handler_name = syn::Ident::new(
+            &format!("serve_{}", slugify(&handler_url)),
+            Span::call_site(),
+        );
+        route_idents.push(handler_name.clone());
 
-        let decl = route_function_decl(&r.path, r.return_type(), &r.return_statement());
-        handlers.push_str(&decl.handler_code);
-        routes.push(decl.route_fn);
+        let handler_code = match &res.file_type {
+            FileType::Html => quote! {
+                #[get(#handler_url)]
+                pub fn #handler_name() -> rocket::response::content::RawHtml<&'static [u8]> {
+                    rocket::response::content::RawHtml(&#const_name)
+                }
+            },
+            FileType::JavaScript => quote! {
+                #[get(#handler_url)]
+                pub fn #handler_name() -> rocket::response::content::RawJavaScript<&'static [u8]> {
+                    rocket::response::content::RawJavaScript(&#const_name)
+                }
+            },
+            FileType::Css => quote! {
+                #[get(#handler_url)]
+                pub fn #handler_name() -> rocket::response::content::RawCss<&'static [u8]> {
+                    rocket::response::content::RawCss(&#const_name)
+                }
+            },
+            FileType::Json => quote! {
+                #[get(#handler_url)]
+                pub fn #handler_name() -> rocket::response::content::RawJson<&'static [u8]> {
+                    rocket::response::content::RawJson(&#const_name)
+                }
+            },
+            FileType::Binary(content_type) => match content_type {
+                ContentType::Unknown => todo!(),
+                ContentType::Png => quote! {
+                    #[get(#handler_url)]
+                    pub fn #handler_name() -> BinaryResponse {
+                        BinaryResponse(&#const_name, rocket::http::ContentType::PNG)
+                    }
+                },
+                ContentType::Ttf => quote! {
+                    #[get(#handler_url)]
+                    pub fn #handler_name() -> BinaryResponse {
+                        BinaryResponse(&#const_name,  rocket::http::ContentType::TTF)
+                    }
+                },
+                ContentType::Ico => quote! {
+                    #[get(#handler_url)]
+                    pub fn #handler_name() -> BinaryResponse {
+                        BinaryResponse(&#const_name,   rocket::http::ContentType::Icon)
+                    }
+                },
+            },
+        };
 
-        if matches!(r.file_type, FileType::Html) {
-            let mut path_without_ext = r.path.clone();
-            path_without_ext.set_extension("");
-            let decl =
-                route_function_decl(&path_without_ext, r.return_type(), &r.return_statement());
-            handlers.push_str(&decl.handler_code);
-            routes.push(decl.route_fn);
+        generated_code = quote! {
+            #generated_code
+            #handler_code
+        };
+        // Add an additional route for Html files without the .html extension
+        if matches!(res.file_type, FileType::Html) {
+            let mut handler_url = PathBuf::from("/");
+            handler_url.push(res.path.to_str().expect("path to_str failed"));
+            handler_url.set_extension("");
+            let handler_url = handler_url.to_str().unwrap();
+            let handler_name = syn::Ident::new(
+                &format!("serve_{}", slugify(handler_url)),
+                Span::call_site(),
+            );
+            route_idents.push(handler_name.clone());
+            let handler = quote! {
+                #[get(#handler_url)]
+                pub fn #handler_name() -> rocket::response::content::RawHtml<&'static [u8]> {
+                    rocket::response::content::RawHtml(&#const_name)
+                }
+            };
+            generated_code = quote! {
+                #generated_code
+                #handler
+            };
         }
     }
+    let routes_collector = quote! {
+        pub fn routes() -> Vec<rocket::Route> {
+            routes![#(#route_idents),*]
+        }
+    };
 
-    code.push_str(&const_decls);
-    code.push_str(&handlers);
-    code.push_str(&routes_collector(routes));
+    generated_code = quote! {
+        #generated_code
+        #routes_collector
+    };
+    generated_code
+}
 
-    Ok(code)
+#[proc_macro]
+pub fn include_as_compressed(input: TokenStream) -> TokenStream {
+    // Parse input
+    let args = parse_macro_input!(input as InclAsCompressedArgs);
+    let module_name = args.module_name;
+
+    // Get the crate root directory
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let folder_path = Path::new(&manifest_dir).join(args.folder_path.value());
+    let folder_str = folder_path
+        .to_str()
+        .expect("Failed to get str from folder_path");
+    let resources = ResourceFile::collect(&folder_path);
+    let mut gz_dir = PathBuf::from("/tmp/rz-embed");
+    let input_slug = slugify(&folder_str);
+    gz_dir.push(&input_slug);
+
+    compress_resources(&folder_path, &gz_dir, &resources);
+
+    let mut generated_code = quote! {
+        use lazy_static::lazy_static;
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+    };
+
+    // Generate code for each resource
+    for res in &resources {
+        let name = syn::Ident::new(&res.const_name, Span::call_site());
+        let compressed_source_path = gz_dir.join(format!("{}.gz", res.slug));
+        let compressed_source_path_str = compressed_source_path.to_str().unwrap();
+        let res_code = quote! {
+            lazy_static! {
+                pub static ref #name: Vec<u8> = {
+                    let compressed_data: &[u8] = include_bytes!(#compressed_source_path_str);
+                    let mut decoder = GzDecoder::new(compressed_data);
+                    let mut decompressed_data = Vec::new();
+                    decoder.read_to_end(&mut decompressed_data).unwrap();
+                    decompressed_data
+                };
+            }
+        };
+        generated_code = quote! {
+            #generated_code
+            #res_code
+        };
+    }
+
+    if args.rocket {
+        let rocket_code = generate_rocket_code(&resources);
+        generated_code = quote! {
+            #generated_code
+            #rocket_code
+        };
+    }
+
+    let result = quote! {
+        mod #module_name {
+            #generated_code
+        }
+    };
+
+    result.into()
 }

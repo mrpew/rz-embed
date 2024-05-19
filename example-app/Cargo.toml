@@ -1,5 +1,5 @@
 [package]
-name = "rz-embed"
+name = "example-app"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,11 +8,5 @@ edition = "2021"
 [dependencies]
 flate2 = "1.0.30"
 lazy_static = "1.4.0"
-proc-macro2 = { version = "1.0.82", features = ["span-locations"] }
-quote = "1.0.36"
-regex = "1.10.4"
-syn = "2.0.64"
-walkdir = "2.5.0"
-
-[lib]
-proc-macro = true
+rocket = "0.5.0"
+rz-embed = { path = "../rz-embed" }
