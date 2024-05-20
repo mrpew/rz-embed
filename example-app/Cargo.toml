@@ -1,0 +1,20 @@
+[package]
+name = "example-app"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+flate2 = "1.0.30"
+lazy_static = "1.4.0"
+rocket = "0.5.0"
+rz-embed = { path = "../rz-embed" }
+
+[[bin]]
+name = "example-rocket"
+path = "src/main_rocket.rs"
+
+[[bin]]
+name = "example-generic"
+path = "src/main_generic.rs"
