@@ -10,3 +10,11 @@ flate2 = "1.0.30"
 lazy_static = "1.4.0"
 rocket = "0.5.0"
 rz-embed = { path = "../rz-embed" }
+
+[[bin]]
+name = "example-rocket"
+path = "src/main_rocket.rs"
+
+[[bin]]
+name = "example-generic"
+path = "src/main_generic.rs"

@@ -7,6 +7,12 @@ rz_embed::include_as_compressed!(
     rocket = true
 );
 
+rz_embed::include_as_compressed!(
+    "src/some-data",
+    module_name = "some_data",
+    rocket = true
+);
+
 #[get("/")]
 fn index() -> rocket::response::content::RawHtml<&'static [u8]> {
     embedded_frontend::serve_index_html()
@@ -16,5 +22,6 @@ fn index() -> rocket::response::content::RawHtml<&'static [u8]> {
 fn rocket() -> _ {
     rocket::build()
         .mount("/", embedded_frontend::routes())
+        .mount("/data", some_data::routes())
         .mount("/", routes![index])
 }
