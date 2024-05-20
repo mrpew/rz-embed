@@ -71,10 +71,7 @@ enum FileType {
 
 impl FileType {
     pub fn from_extension(ext: &Option<String>) -> Self {
-        let ext = match ext {
-            Some(e) => Some(e.as_str()),
-            None => None,
-        };
+        let ext = ext.as_ref().map(|e| e.as_str());
         match ext {
             Some("html") => FileType::Html,
             Some("js") => FileType::JavaScript,
@@ -109,10 +106,7 @@ impl ResourceFile {
             .to_str()
             .expect("Failed to convert file name to str");
         let path_str = rel_path.to_str().expect("Failed to convert path to str");
-        let extension = name
-            .split('.')
-            .last()
-            .map_or(None, |ext| Some(ext.to_string()));
+        let extension = name.split('.').last().map(|ext| ext.to_string());
         let file_type = FileType::from_extension(&extension);
         let slug = slugify(path_str);
         let const_name = slug.to_ascii_uppercase();
@@ -126,10 +120,10 @@ impl ResourceFile {
 
     pub fn collect(root_dir: &PathBuf) -> Vec<ResourceFile> {
         let mut result = Vec::new();
-        for entry in WalkDir::new(&root_dir).into_iter().filter_map(Result::ok) {
+        for entry in WalkDir::new(root_dir).into_iter().filter_map(Result::ok) {
             let path = entry.path();
             if path.is_file() {
-                let relative_path = path.strip_prefix(&root_dir).expect("path error");
+                let relative_path = path.strip_prefix(root_dir).expect("path error");
                 let resource = ResourceFile::from_path(relative_path);
                 result.push(resource);
             }
@@ -139,13 +133,10 @@ impl ResourceFile {
     //
 }
 
-fn compress_resource(src: &PathBuf, dst: &PathBuf, r: &ResourceFile) -> (u64, u64) {
-    let mut src = src.clone();
-    src.push(&r.path);
+fn compress_resource(src: &Path, dst: &Path, r: &ResourceFile) -> (u64, u64) {
+    let src = src.join(&r.path);
     let meta_original = fs::metadata(&src).expect("Failed to get file metadata");
-
-    let mut compressed_path = dst.clone();
-    compressed_path.push(format!("{}.gz", r.slug));
+    let compressed_path = dst.join(format!("{}.gz", r.slug));
 
     // Check if the compressed file exists, return early if the original was not
     // modified since compression occured.
@@ -210,9 +201,9 @@ fn calculate_compression_rate(original_size: u64, compressed_size: u64) -> f64 {
 fn compress_resources(src: &PathBuf, gz: &PathBuf, resources: &Vec<ResourceFile>) -> (u64, u64) {
     let mut total_original_sz = 0_u64;
     let mut total_compressed_sz = 0_u64;
-    create_dir_all(&gz).expect("Failed to create gz directory");
+    create_dir_all(gz).expect("Failed to create gz directory");
     for r in resources {
-        let (orig, reduced) = compress_resource(&src, &gz, &r);
+        let (orig, reduced) = compress_resource(src, gz, r);
         total_original_sz += orig;
         total_compressed_sz += reduced;
     }
@@ -333,7 +324,12 @@ fn generate_rocket_code(resources: &Vec<ResourceFile>) -> proc_macro2::TokenStre
                 }
             },
             FileType::Binary(content_type) => match content_type {
-                ContentType::Unknown => todo!(),
+                ContentType::Unknown => quote! {
+                    #[get(#handler_url)]
+                    pub fn #handler_name() -> BinaryResponse {
+                        BinaryResponse(&#const_name, rocket::http::ContentType::Binary)
+                    }
+                },
                 ContentType::Png => quote! {
                     #[get(#handler_url)]
                     pub fn #handler_name() -> BinaryResponse {
@@ -407,12 +403,12 @@ pub fn include_as_compressed(input: TokenStream) -> TokenStream {
         .to_str()
         .expect("Failed to get str from folder_path");
     let resources = ResourceFile::collect(&folder_path);
-    let input_slug = slugify(&folder_str);
+    let input_slug = slugify(folder_str);
     // GZ dir should conform to crate conventions
     let gz_dir = PathBuf::from(&manifest_dir)
         .join("target")
         .join("rz-embed")
-        .join(&input_slug);
+        .join(input_slug);
 
     compress_resources(&folder_path, &gz_dir, &resources);
 
