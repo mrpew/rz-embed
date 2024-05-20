@@ -467,6 +467,12 @@ mod tests {
             ),
             "f0o_b_r_b_z_üääü_ł_ŧ_øþ_µ_txt"
         );
+        assert_eq!(
+            super::slugify(
+                "a______b"
+            ),
+            "a_b"
+        );
     }
     
 }
