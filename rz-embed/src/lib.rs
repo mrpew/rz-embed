@@ -21,7 +21,7 @@ fn slugify(value: &str) -> String {
     // Create regex patterns - TODO: make these lazy_static
     let RE_NON_ALPHANUMERIC = Regex::new(r"[^\w\s-]").unwrap();
     let RE_WHITESPACE_HYPHEN = Regex::new(r"[-\s]+").unwrap();
-    let RE_REDUCE_UNDESCORES = Regex::new(r"[_]+").unwrap();
+    let RE_REDUCE_UNDESCORES = Regex::new(r"_+").unwrap();
 
     // Replace non-alphanumeric characters with underscores
     let mut value = RE_NON_ALPHANUMERIC.replace_all(value, "_").to_string();
@@ -455,4 +455,18 @@ pub fn include_as_compressed(input: TokenStream) -> TokenStream {
     };
 
     result.into()
+}
+
+mod tests {
+    #[test]
+    fn test_slugify() {
+        // just a sanity check - maybe we should further limit this to prevent "uncommon code points"
+        assert_eq!(
+            super::slugify(
+                "f0o/b$r/b🇺🇳z/!\"§$%&()=?`''¹²³¼½¬{[]}\\¸ÜÄäü*':;.,@ł€¶ŧ←↓→øþ¨~»«¢„“”µ·…txt"
+            ),
+            "f0o_b_r_b_z_üääü_ł_ŧ_øþ_µ_txt"
+        );
+    }
+    
 }
