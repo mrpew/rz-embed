@@ -198,7 +198,7 @@ fn calculate_compression_rate(original_size: u64, compressed_size: u64) -> f64 {
     rate * 100.0
 }
 
-fn compress_resources(src: &PathBuf, gz: &PathBuf, resources: &Vec<ResourceFile>) -> (u64, u64) {
+fn compress_resources(src: &Path, gz: &Path, resources: &Vec<ResourceFile>) -> (u64, u64) {
     let mut total_original_sz = 0_u64;
     let mut total_compressed_sz = 0_u64;
     create_dir_all(gz).expect("Failed to create gz directory");
