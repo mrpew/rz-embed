@@ -1,6 +1,7 @@
 extern crate proc_macro;
 use std::path::PathBuf;
 
+use lazy_static::lazy_static;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
@@ -17,12 +18,13 @@ use std::io::{self, BufReader, BufWriter, Read};
 use std::path::Path;
 use walkdir::WalkDir;
 
-fn slugify(value: &str) -> String {
-    // Create regex patterns - TODO: make these lazy_static
-    let RE_NON_ALPHANUMERIC = Regex::new(r"[^\w\s-]").unwrap();
-    let RE_WHITESPACE_HYPHEN = Regex::new(r"[-\s]+").unwrap();
-    let RE_REDUCE_UNDESCORES = Regex::new(r"_+").unwrap();
+lazy_static! {
+    static ref RE_NON_ALPHANUMERIC: Regex = Regex::new(r"[^\w\s-]").unwrap();
+    static ref RE_WHITESPACE_HYPHEN: Regex = Regex::new(r"[-\s]+").unwrap();
+    static ref RE_REDUCE_UNDESCORES: Regex = Regex::new(r"_+").unwrap();
+}
 
+fn slugify(value: &str) -> String {
     // Replace non-alphanumeric characters with underscores
     let mut value = RE_NON_ALPHANUMERIC.replace_all(value, "_").to_string();
     // Trim and convert to lowercase
@@ -398,17 +400,19 @@ pub fn include_as_compressed(input: TokenStream) -> TokenStream {
     // Parse input
     let args = parse_macro_input!(input as InclAsCompressedArgs);
     let module_name = args.module_name;
-
-    // Get the crate root directory
+    // Input paths should behave like include_bytes
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let folder_path = Path::new(&manifest_dir).join(args.folder_path.value());
     let folder_str = folder_path
         .to_str()
         .expect("Failed to get str from folder_path");
     let resources = ResourceFile::collect(&folder_path);
-    let mut gz_dir = PathBuf::from("/tmp/rz-embed");
     let input_slug = slugify(&folder_str);
-    gz_dir.push(&input_slug);
+    // GZ dir should conform to crate conventions
+    let gz_dir = PathBuf::from(&manifest_dir)
+        .join("target")
+        .join("rz-embed")
+        .join(&input_slug);
 
     compress_resources(&folder_path, &gz_dir, &resources);
 
@@ -467,12 +471,6 @@ mod tests {
             ),
             "f0o_b_r_b_z_üääü_ł_ŧ_øþ_µ_txt"
         );
-        assert_eq!(
-            super::slugify(
-                "a______b"
-            ),
-            "a_b"
-        );
+        assert_eq!(super::slugify("a______b"), "a_b");
     }
-    
 }
