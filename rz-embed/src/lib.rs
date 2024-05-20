@@ -66,6 +66,8 @@ enum FileType {
     JavaScript,
     Css,
     Json,
+    Xml,
+    Plain,
     Binary(ContentType),
 }
 
@@ -77,6 +79,8 @@ impl FileType {
             Some("js") => FileType::JavaScript,
             Some("css") => FileType::Css,
             Some("json") => FileType::Json,
+            Some("xml") => FileType::Xml,
+            Some("txt") | Some("md") => FileType::Plain,
             //
             Some(other) => FileType::Binary(ContentType::from_extension(other)),
             None => FileType::Binary(ContentType::Unknown),
@@ -323,6 +327,19 @@ fn generate_rocket_code(resources: &Vec<ResourceFile>) -> proc_macro2::TokenStre
                     rocket::response::content::RawJson(&#const_name)
                 }
             },
+            FileType::Xml => quote! {
+                #[get(#handler_url)]
+                pub fn #handler_name() -> rocket::response::content::RawXml<&'static [u8]> {
+                    rocket::response::content::RawXml(&#const_name)
+                }
+            },
+            FileType::Plain => quote! {
+                #[get(#handler_url)]
+                pub fn #handler_name() -> rocket::response::content::RawText<&'static [u8]> {
+                    rocket::response::content::RawText(&#const_name)
+                }
+            },
+
             FileType::Binary(content_type) => match content_type {
                 ContentType::Unknown => quote! {
                     #[get(#handler_url)]
