@@ -457,6 +457,38 @@ pub fn include_as_compressed(input: TokenStream) -> TokenStream {
         };
     }
 
+    // Function to restore to disk
+    let mut store_to_disk_fn_body = quote! {};
+    for res in &resources {
+        let name = syn::Ident::new(&res.const_name, Span::call_site());
+        let path = syn::LitStr::new(&res.path.to_string_lossy(), Span::call_site());
+        let parts = quote! {
+            {
+                let path = dst.join(#path);
+                let parent = path.parent().expect("Failed to get parent: {path:?}");
+                if !parent.is_dir() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut file_handle = std::fs::File::create(path)?;
+                std::io::Write::write_all(&mut file_handle, &#name)?;
+            }
+        };
+        store_to_disk_fn_body = quote! {
+            #store_to_disk_fn_body
+            #parts
+        };
+    }
+    let store_to_disk_fn = quote! {
+        pub fn extract_to_folder(dst: &std::path::Path) -> std::result::Result<(), std::io::Error> {
+            #store_to_disk_fn_body
+            Ok(())
+        }
+    };
+    generated_code = quote! {
+        #generated_code
+        #store_to_disk_fn
+    };
+
     if args.rocket {
         let rocket_code = generate_rocket_code(&resources);
         generated_code = quote! {
@@ -473,6 +505,7 @@ pub fn include_as_compressed(input: TokenStream) -> TokenStream {
 
     result.into()
 }
+
 
 mod tests {
     #[test]
